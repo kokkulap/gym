@@ -13,6 +13,13 @@ let ageStatusChartInstance = null;
 let memberFilterState = 'active';
 let currentTheme = localStorage.getItem('gymTheme') || 'red';
 let selectedFitnessMember = null;
+let gymSettings = {
+    name: "THE ULTIMATE GYM 2.0",
+    phone: "+91 99999 00000",
+    address: "Default Gym Address",
+    taxId: "GST-PENDING",
+    signature: "Sign.jpeg" 
+};
 // Pagination State
 let memberPage = 1;
 let financePage = 1;
@@ -116,18 +123,30 @@ const dataLabelPlugin = {
 
 // --- NAVIGATION ---
 window.switchTab = (tab) => {
+    // 1. Hide all views
     document.querySelectorAll('.view-section').forEach(e => e.style.display = 'none');
-    document.querySelectorAll('.nav-item').forEach(e => e.classList.remove('active'));
-    document.getElementById(`view-${tab}`).style.display = 'block';
     
-    // Desktop Nav
+    // 2. Remove 'active' class from all nav items (spans)
+    document.querySelectorAll('.nav-item').forEach(e => e.classList.remove('active'));
+    
+    // 3. Show the selected view
+    const viewEl = document.getElementById(`view-${tab}`);
+    if(viewEl) viewEl.style.display = 'block';
+    
+    // 4. Highlight the current nav item
     const dTab = document.getElementById(`tab-${tab}`);
     if(dTab) dTab.classList.add('active');
 
-    // Mobile Nav
+    // 5. MOBILE: If you have mobile buttons, highlight them too
     document.querySelectorAll('.nav-btn').forEach(e => e.classList.remove('active'));
     const mTab = document.getElementById(`mob-${tab}`);
     if(mTab) mTab.classList.add('active');
+
+    // --- IMPORTANT: TRIGGER THE RECORDS LOGIC ---
+    if(tab === 'records') {
+        if(window.renderRecordsTab) window.renderRecordsTab();
+        if(window.initRecordsDates) window.initRecordsDates();
+    }
 };
 
 window.toggleMobileMenu = () => { console.log("Mobile menu toggled"); };
@@ -1066,10 +1085,25 @@ window.saveMember = async () => {
 window.renewMember = (id) => {
     const m = members.find(x => x.id === id);
     if(!m) return;
-    document.getElementById('renew-id').value = id;
-    document.getElementById('renew-name').innerText = m.name;
-    document.getElementById('renew-amount').value = ""; 
-    document.getElementById('modal-renew').style.display = 'flex';
+
+    // 1. Set ID
+    const idEl = document.getElementById('renew-id');
+    if(idEl) idEl.value = id;
+
+    // 2. Set Name
+    const nameEl = document.getElementById('renew-name');
+    if(nameEl) nameEl.innerText = m.name;
+
+    // 3. Clear Amount (This is where your error likely was)
+    const amountEl = document.getElementById('renew-amount');
+    if(amountEl) amountEl.value = ""; 
+
+    // 4. Show Modal
+    const modal = document.getElementById('modal-renew');
+    if(modal) modal.style.display = 'flex';
+    
+    // 5. Refresh Dropdown (To ensure plans are loaded)
+    if(window.updatePlanDropdowns) window.updatePlanDropdowns();
 };
 
 window.closeRenewModal = () => { 
@@ -1080,38 +1114,65 @@ window.confirmRenewal = async () => {
     if (window.isDemoMode) return alert("Disabled in Demo Mode.");
 
     const id = document.getElementById('renew-id').value;
-    const plan = document.getElementById('renew-plan').value;
+    const select = document.getElementById('renew-plan');
     const amount = document.getElementById('renew-amount').value;
     const mode = document.getElementById('renew-paymode').value;
     
     if(!amount) return alert("Please enter the paid amount.");
+    if(!select.value) return alert("Please select a plan.");
+
+    // Extract duration from the selected plan JSON
+    let duration = "1m"; // default
+    try {
+        const data = JSON.parse(select.value);
+        duration = data.dur;
+    } catch(e) { return alert("Invalid Plan Selected"); }
 
     const m = members.find(x => x.id === id);
     if(!m) return alert("Member not found.");
 
+    // --- DATE LOGIC START ---
     const today = new Date();
-    const currentExpiry = new Date(m.expiryDate);
+    // Normalize today to midnight to avoid time glitches
+    today.setHours(0,0,0,0);
+
+    let currentExpiry = new Date(m.expiryDate);
+    // Validate current expiry
+    if (isNaN(currentExpiry.getTime())) {
+        currentExpiry = new Date(); // Fallback if invalid
+        currentExpiry.setDate(currentExpiry.getDate() - 1); // Treat as expired
+    } else {
+        currentExpiry.setHours(0,0,0,0);
+    }
+
+    // Smart Start Date: If active, start after expiry. If expired, start today.
     const startDate = (currentExpiry > today) ? currentExpiry : today;
     
     const d = new Date(startDate);
-    const val = parseInt(plan);
-    if(plan.includes('d')) d.setDate(d.getDate() + val);
-    else if(plan.includes('y')) d.setFullYear(d.getFullYear() + val);
+    const val = parseInt(duration);
+    
+    // Add Duration
+    if(duration.includes('d')) d.setDate(d.getDate() + val);
+    else if(duration.includes('y')) d.setFullYear(d.getFullYear() + val);
     else d.setMonth(d.getMonth() + val);
     
     const newExpiry = d.toISOString().split('T')[0];
-    const todayStr = today.toISOString().split('T')[0];
+    const todayStr = new Date().toISOString().split('T')[0];
+    // --- DATE LOGIC END ---
 
     await updateDoc(doc(db, `gyms/${currentUser.uid}/members`, id), {
         expiryDate: newExpiry,
-        lastPaidAmount: amount,
-        planDuration: plan
+        lastPaidAmount: parseFloat(amount),
+        planDuration: duration // Store the code (e.g. '1m')
     });
 
-    await addFinanceEntry(`Renewal - ${m.name}`, amount, mode, todayStr, id, plan, newExpiry);
+    await addFinanceEntry(`Renewal - ${m.name}`, amount, mode, todayStr, id, duration, newExpiry);
 
     window.closeRenewModal();
-    alert(`Membership Renewed! New Expiry: ${newExpiry}`);
+    alert(`Membership Renewed!\nOld Expiry: ${m.expiryDate}\nNew Expiry: ${newExpiry}`);
+    
+    // Refresh lists
+    window.renderMembersList();
 };
 
 // --- UPDATED HISTORY LOGIC (DATES + PAYMENTS) ---
@@ -1124,28 +1185,29 @@ window.toggleHistory = async (id) => {
     // 1. GET ATTENDANCE DATA
     const m = members.find(x => x.id === id);
     const attendanceList = m.attendance || [];
-    // Sort dates (newest first)
     attendanceList.sort((a, b) => new Date(b) - new Date(a));
 
     let attendanceHTML = "";
     if(attendanceList.length > 0) {
         attendanceHTML = `
-            <div style="margin-bottom:15px; border-bottom:1px solid #333; padding-bottom:10px;">
-                <h4 style="color:#fff; margin:0 0 5px 0; font-size:0.9rem;">Attendance Log (${attendanceList.length} Days)</h4>
-                <div style="max-height:100px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:5px;">
-                    ${attendanceList.map(date => `<span style="background:#333; color:#ccc; padding:2px 6px; border-radius:4px; font-size:0.75rem;">${date}</span>`).join('')}
+            <div style="margin-bottom:20px; border-bottom:1px solid #333; padding-bottom:15px;">
+                <h4 style="color:var(--accent); margin:0 0 10px 0; font-size:1rem; display:flex; align-items:center; gap:8px;">
+                    <i class="fa-solid fa-calendar-check"></i> Attendance Log <span style="font-size:0.8rem; color:#888; font-weight:normal;">(${attendanceList.length} Days)</span>
+                </h4>
+                <div style="max-height:100px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:6px;">
+                    ${attendanceList.map(date => `<span style="background:rgba(255,255,255,0.1); color:#fff; padding:4px 8px; border-radius:4px; font-size:0.8rem; border:1px solid #444;">${date}</span>`).join('')}
                 </div>
             </div>`;
     } else {
-        attendanceHTML = `<div style="margin-bottom:15px; color:#666; font-size:0.8rem;">No attendance records found.</div>`;
+        attendanceHTML = `<div style="margin-bottom:15px; color:#666; font-size:0.9rem;">No attendance records found.</div>`;
     }
 
     if (window.isDemoMode) {
-        panel.innerHTML = attendanceHTML + '<div style="color:#888; font-size:0.8rem;">Transactions hidden in demo.</div>';
+        panel.innerHTML = attendanceHTML + '<div style="color:#888;">Transactions hidden in demo.</div>';
         return;
     }
 
-    panel.innerHTML = attendanceHTML + '<div style="color:#888; font-size:0.8rem;">Loading Payments...</div>';
+    panel.innerHTML = attendanceHTML + '<div style="color:#aaa; font-size:0.9rem;"><i class="fa-solid fa-spinner fa-spin"></i> Loading Payments...</div>';
 
     // 2. GET PAYMENT DATA
     const q = query(
@@ -1159,12 +1221,16 @@ window.toggleHistory = async (id) => {
         
         let paymentHTML = "";
         if(snap.empty) {
-            paymentHTML = '<div style="color:#888; font-size:0.8rem;">No payment history found.</div>';
+            paymentHTML = '<div style="color:#888; font-size:0.9rem;">No payment history found.</div>';
         } else {
             paymentHTML = `
-                <h4 style="color:#fff; margin:0 0 5px 0; font-size:0.9rem;">Payment History</h4>
-                <table class="history-table">
-                    <thead><tr><th>Date</th><th>Category</th><th>Amount</th><th>Action</th></tr></thead>
+                <h4 style="color:var(--accent); margin:0 0 10px 0; font-size:1rem; display:flex; align-items:center; gap:8px;">
+                    <i class="fa-solid fa-money-bill-wave"></i> Payment History
+                </h4>
+                <table class="history-table" style="width:100%; text-align:left; font-size:0.9rem; border-collapse:collapse;">
+                    <thead style="background:rgba(255,255,255,0.05); color:#fff;">
+                        <tr><th style="padding:8px;">Date</th><th style="padding:8px;">Category</th><th style="padding:8px;">Amount</th><th style="padding:8px;">Print</th></tr>
+                    </thead>
                     <tbody>
             `;
             
@@ -1172,7 +1238,6 @@ window.toggleHistory = async (id) => {
                 const t = doc.data();
                 const safePlan = t.snapshotPlan || '';
                 const safeExpiry = t.snapshotExpiry || '';
-                
                 let timeStr = "-";
                 if(t.createdAt && t.createdAt.seconds) {
                     const dateObj = new Date(t.createdAt.seconds * 1000);
@@ -1180,11 +1245,11 @@ window.toggleHistory = async (id) => {
                 }
 
                 paymentHTML += `
-                    <tr>
-                        <td>${t.date}</td>
-                        <td>${t.category}</td>
-                        <td style="color:${t.type==='income'?'#22c55e':'#ef4444'}">${t.amount}</td>
-                        <td><i class="fa-solid fa-print" style="cursor:pointer; color:#888;" onclick="printHistoryInvoice('${id}', '${t.amount}', '${t.date}', '${t.mode}', '${t.category}', '${safePlan}', '${safeExpiry}', '${timeStr}')"></i></td>
+                    <tr style="border-bottom:1px solid #333;">
+                        <td style="padding:8px; color:#ccc;">${t.date}</td>
+                        <td style="padding:8px; color:#ccc;">${t.category}</td>
+                        <td style="padding:8px; color:${t.type==='income'?'#22c55e':'#ef4444'}; font-weight:bold;">₹${t.amount}</td>
+                        <td style="padding:8px;"><i class="fa-solid fa-print" style="cursor:pointer; color:var(--accent);" onclick="printHistoryInvoice('${id}', '${t.amount}', '${t.date}', '${t.mode}', '${t.category}', '${safePlan}', '${safeExpiry}', '${timeStr}')"></i></td>
                     </tr>`;
             });
             paymentHTML += `</tbody></table>`;
@@ -1194,7 +1259,7 @@ window.toggleHistory = async (id) => {
 
     } catch (e) {
         console.error(e);
-        panel.innerHTML = attendanceHTML + '<div style="color:#ef4444; font-size:0.8rem;">Error loading payments.</div>';
+        panel.innerHTML = attendanceHTML + '<div style="color:#ef4444;">Error loading payments.</div>';
     }
 };
 
@@ -1216,59 +1281,67 @@ window.printHistoryInvoice = (memberId, amount, date, mode, category, plan, expi
 };
 
 window.generateInvoice = async (m, specificTransaction = null) => {
+    if (!window.jspdf) return alert("PDF Library not loaded. Please wait or refresh.");
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF();
-    
-    const themeColor = [0, 0, 0]; 
-    let finalY = 0;
 
+    // --- 1. PREPARE DATA ---
     const isHistory = !!specificTransaction;
     const amt = isHistory ? specificTransaction.amount : m.lastPaidAmount;
     const date = isHistory ? specificTransaction.date : new Date().toISOString().split('T')[0];
     const time = isHistory ? (specificTransaction.timeStr || '') : new Date().toLocaleTimeString('en-US', {hour: '2-digit', minute:'2-digit'});
-    const mode = isHistory ? specificTransaction.mode : 'Cash'; 
+    const mode = isHistory ? specificTransaction.mode : 'Cash';
     const category = isHistory ? specificTransaction.category : 'Membership Fees';
     const rawPlan = (isHistory && specificTransaction.snapshotPlan) ? specificTransaction.snapshotPlan : m.planDuration;
     const rawExpiry = (isHistory && specificTransaction.snapshotExpiry) ? specificTransaction.snapshotExpiry : m.expiryDate;
+    
     const planText = window.formatPlanDisplay ? window.formatPlanDisplay(rawPlan) : rawPlan;
 
-    doc.setFillColor(...themeColor);
+    // --- 2. HEADER DESIGN ---
+    doc.setFillColor(20, 20, 20); // Dark Header
     doc.rect(0, 0, 210, 25, 'F');
     
     doc.setFontSize(20);
     doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
-    doc.text("THE ULTIMATE GYM 2.0", 14, 16);
+    // USE DYNAMIC GYM NAME
+    doc.text(gymSettings.name.toUpperCase(), 14, 16);
 
+    // Optional: Add Logo if it exists in directory
     try {
         const logoImg = new Image();
         logoImg.src = 'logo.png';
-        doc.addImage(logoImg, 'PNG', 175, 1.5, 22, 22); 
-    } catch(e) { console.log("Logo error", e); }
-    
+        doc.addImage(logoImg, 'PNG', 175, 1.5, 22, 22);
+    } catch(e) { /* Ignore if no logo */ }
+
+    // --- 3. RECEIPT INFO ---
     doc.setFontSize(14);
     doc.setTextColor(0, 0, 0);
     doc.text("Payment Receipt", 14, 35);
+    doc.setLineWidth(0.5);
     doc.line(14, 37, 196, 37);
 
     doc.setFontSize(10);
     doc.setFont("helvetica", "normal");
     const receiptNo = `REC-${m.memberId}-${Math.floor(Math.random()*1000)}`;
     doc.text(`Receipt #: ${receiptNo}`, 14, 45);
-    doc.text(`Date: ${date}  ${time}`, 140, 45); 
+    doc.text(`Date: ${date}  ${time}`, 140, 45);
 
+    // --- 4. DYNAMIC ADDRESS BLOCK ---
     doc.setFontSize(9);
     doc.setTextColor(100, 100, 100);
-    const address = "1-2-607/75/76, LIC Colony, Road, behind NTR Stadium, Ambedkar Nagar, Gandhi Nagar, Hyderabad, Telangana 500080";
-    const splitAddress = doc.splitTextToSize(address, 180);
+    
+    // Auto-split long addresses
+    const splitAddress = doc.splitTextToSize(gymSettings.address, 120);
     doc.text(splitAddress, 14, 52);
     
-    let currentY = 52 + (splitAddress.length * 4); 
+    let currentY = 52 + (splitAddress.length * 4);
     
-    doc.text("Contact: +91 99485 92213 | +91 97052 73253", 14, currentY);
-    currentY += 5; 
-    doc.text("GST NO: 36CYZPA903181Z1", 14, currentY);
+    doc.text(`Contact: ${gymSettings.phone}`, 14, currentY);
+    currentY += 5;
+    doc.text(`GST/Tax ID: ${gymSettings.taxId}`, 14, currentY);
 
+    // --- 5. MEMBER TABLE ---
     doc.autoTable({
         startY: currentY + 10,
         theme: 'grid',
@@ -1276,7 +1349,7 @@ window.generateInvoice = async (m, specificTransaction = null) => {
         body: [
             ['Member ID', m.memberId || 'N/A', 'Name', m.name],
             ['Gender', m.gender || 'N/A', 'Phone', m.phone],
-            ['Duration', planText, 'Valid Until', rawExpiry], 
+            ['Plan', planText, 'Valid Until', rawExpiry],
             ['Payment Mode', mode, 'Amount Paid', `Rs. ${amt}`]
         ],
         styles: { fontSize: 10, cellPadding: 3, lineColor: [200, 200, 200], lineWidth: 0.1 },
@@ -1288,7 +1361,8 @@ window.generateInvoice = async (m, specificTransaction = null) => {
         }
     });
 
-    finalY = doc.lastAutoTable.finalY + 10;
+    // --- 6. TRANSACTION DETAILS ---
+    let finalY = doc.lastAutoTable.finalY + 10;
 
     doc.setFontSize(12);
     doc.setTextColor(0, 0, 0);
@@ -1296,29 +1370,31 @@ window.generateInvoice = async (m, specificTransaction = null) => {
     
     doc.autoTable({
         startY: finalY + 5,
-        head: [['Description', 'Date & Time', 'Mode', 'Amount']],
-        body: [[category, `${date} ${time}`, mode, `Rs. ${amt}`]],
+        head: [['Description', 'Date', 'Mode', 'Amount']],
+        body: [[category, `${date}`, mode, `Rs. ${amt}`]],
         theme: 'striped',
-        headStyles: { fillColor: themeColor },
+        headStyles: { fillColor: [20, 20, 20] },
         styles: { fontSize: 9, cellPadding: 3 }
     });
 
-    finalY = doc.lastAutoTable.finalY + 20;
+    finalY = doc.lastAutoTable.finalY + 25;
 
+    // --- 7. FOOTER & SIGNATURE ---
     doc.setFontSize(10);
     doc.text("Receiver Sign:", 14, finalY);
     doc.text("Authorized Signature", 150, finalY);
     
-    try {
-        const signImg = new Image();
-        signImg.src = 'Sign.jpeg'; 
-        doc.addImage(signImg, 'JPEG', 150, finalY - 5, 50, 25); 
-    } catch(e) { console.log("Sign error", e); }
+    // Add Dynamic Signature Image
+    if (gymSettings.signature && gymSettings.signature.length > 50) {
+        try {
+            doc.addImage(gymSettings.signature, 'JPEG', 150, finalY - 15, 40, 15);
+        } catch(e) { console.log("Sign render error", e); }
+    }
 
-    doc.line(14, finalY + 15, 60, finalY + 15);
-    doc.line(150, finalY + 15, 196, finalY + 15);
+    doc.line(14, finalY + 10, 60, finalY + 10);
+    doc.line(150, finalY + 10, 196, finalY + 10);
    
-    finalY += 30; 
+    finalY += 20;
     doc.setFontSize(8);
     doc.setTextColor(150, 150, 150);
     doc.text("Note: Fees once paid are not refundable.", 14, finalY);
@@ -1354,23 +1430,69 @@ window.deleteMember = async (id) => {
 
 window.saveTransaction = async () => {
     if(window.isDemoMode) return alert("Saving is disabled in Demo Mode.");
+
+    // 1. Get Values
     const type = document.getElementById('tx-type').value; 
     const cat = document.getElementById('tx-category').value; 
     const mode = document.getElementById('tx-paymode').value;
     const amt = parseFloat(document.getElementById('tx-amount').value); 
     const date = document.getElementById('tx-date').value; 
-    if(!cat || !amt) return alert("Fill details"); 
+
+    // 2. Validation
+    if(!cat || !amt || !date) return alert("Please fill all details"); 
+
     const data = { type, category: cat, amount: amt, date, mode }; 
-    if(editingTxId) { await updateDoc(doc(db, `gyms/${currentUser.uid}/transactions`, editingTxId), data); editingTxId = null; } 
-    else { data.createdAt = new Date(); await addDoc(collection(db, `gyms/${currentUser.uid}/transactions`), data); } 
-    window.toggleTxModal(); 
+
+    try {
+        // 3. Check if Editing or New
+        if(editingTxId) { 
+            // UPDATE Existing
+            await updateDoc(doc(db, `gyms/${currentUser.uid}/transactions`, editingTxId), data); 
+            alert("Transaction Updated!");
+            editingTxId = null; // Reset ID after save
+        } else { 
+            // CREATE New
+            data.createdAt = new Date(); 
+            await addDoc(collection(db, `gyms/${currentUser.uid}/transactions`), data); 
+            alert("Transaction Saved!");
+        } 
+
+        // 4. Close Modal
+        window.toggleTxModal(); 
+        
+        // 5. REFRESH THE UI (Important!)
+        // If we are currently on the Records tab, reload it
+        if(document.getElementById('view-records').style.display === 'block') {
+            window.renderRecordsTab();
+        }
+
+    } catch(e) {
+        console.error("Save Error:", e);
+        alert("Error saving: " + e.message);
+    }
 };
 
 window.editTransaction = (id) => {
-    const t = transactions.find(x => x.id === id); if(!t) return;
-    editingTxId = id;
-    document.getElementById('tx-type').value = t.type; document.getElementById('tx-category').value = t.category; document.getElementById('tx-amount').value = t.amount; document.getElementById('tx-date').value = t.date;
-    document.getElementById('modal-transaction').style.display = 'flex';
+    // 1. Find the transaction in the list
+    const t = transactions.find(x => x.id === id); 
+    if(!t) return alert("Transaction not found!");
+
+    // 2. Set the global variable so saveTransaction knows what to update
+    editingTxId = id; 
+
+    // 3. Fill the Modal Inputs
+    document.getElementById('tx-type').value = t.type; 
+    document.getElementById('tx-category').value = t.category; 
+    document.getElementById('tx-amount').value = t.amount; 
+    document.getElementById('tx-date').value = t.date;
+    
+    // Fill Payment Mode (handle older data that might not have it)
+    const modeEl = document.getElementById('tx-paymode');
+    if(modeEl) modeEl.value = t.mode || 'Cash';
+
+    // 4. Open the Modal
+    const modal = document.getElementById('modal-transaction');
+    modal.style.display = 'flex';
 };
 
 window.deleteTransaction = async (id) => { 
@@ -1380,69 +1502,156 @@ window.deleteTransaction = async (id) => {
 
 // --- RENDER MEMBERS (With Blue Badge & Revoke Logic) ---
 window.renderMembersList = () => {
-    const list = document.getElementById('members-list'); 
-    if(!list) return; 
+    const list = document.getElementById('members-list');
+    if(!list) return;
     list.innerHTML = "";
 
+    // 1. Get Search & Filter Values
     const searchQ = document.getElementById('member-search') ? document.getElementById('member-search').value.toLowerCase() : "";
-    const today = new Date().toISOString().split('T')[0];
-
-    // 1. Filter first
-    let filteredMembers = members.filter(m => 
-        m.name.toLowerCase().includes(searchQ) || 
-        (m.memberId && m.memberId.toLowerCase().includes(searchQ)) || 
-        m.phone.includes(searchQ)
-    );
-
-    // 2. Pagination Logic
-    const totalPages = Math.ceil(filteredMembers.length / itemsPerPage) || 1;
+    const filterType = document.getElementById('member-filter-status') ? document.getElementById('member-filter-status').value : "all";
     
-    // Ensure current page is valid
+    // Date Helpers
+    const today = new Date();
+    today.setHours(0,0,0,0);
+    const currentMonth = today.getMonth();
+    const currentYear = today.getFullYear();
+
+    // 2. FILTER LOGIC (The Core Magic)
+    let filteredMembers = members.filter(m => {
+        // A. Text Search Check
+        const matchesSearch = 
+            m.name.toLowerCase().includes(searchQ) || 
+            (m.memberId && m.memberId.toLowerCase().includes(searchQ)) || 
+            m.phone.includes(searchQ);
+
+        // B. Status Filter Check
+        let matchesStatus = true;
+        const expDate = new Date(m.expiryDate);
+        const joinDate = new Date(m.joinDate);
+        
+        // Reset hours for accurate date comparison
+        expDate.setHours(0,0,0,0);
+
+        if (filterType === 'active') {
+            matchesStatus = expDate >= today;
+        } 
+        else if (filterType === 'expired') {
+            matchesStatus = expDate < today;
+        } 
+        else if (filterType === 'new_month') {
+            // Joined in current Month & Year
+            matchesStatus = (joinDate.getMonth() === currentMonth && joinDate.getFullYear() === currentYear);
+        }
+        else if (filterType === 'exp_month') {
+            // Expires in current Month & Year
+            matchesStatus = (expDate.getMonth() === currentMonth && expDate.getFullYear() === currentYear);
+        }
+        else if (filterType === 'exp_soon') {
+            // Expires within next 7 days (including today)
+            const diffTime = expDate - today;
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            matchesStatus = (diffDays >= 0 && diffDays <= 7);
+        }
+
+        // Return TRUE only if BOTH match
+        return matchesSearch && matchesStatus;
+    });
+
+    // 3. Pagination Logic
+    const totalPages = Math.ceil(filteredMembers.length / itemsPerPage) || 1;
     if (memberPage > totalPages) memberPage = totalPages;
     if (memberPage < 1) memberPage = 1;
 
-    // Update Indicator Text
     const indicator = document.getElementById('page-indicator-members');
     if(indicator) indicator.innerText = `Page ${memberPage} of ${totalPages}`;
 
-    // Slice Data for current page
     const start = (memberPage - 1) * itemsPerPage;
     const end = start + itemsPerPage;
     const paginatedData = filteredMembers.slice(start, end);
 
     if (paginatedData.length === 0) {
-        list.innerHTML = `<div style="text-align:center; padding:20px; color:#666;">No members found.</div>`;
+        list.innerHTML = `<div style="text-align:center; padding:30px; color:#666;">No members found matching filters.</div>`;
         return;
     }
 
-    // 3. Render
+    // 4. Render List Rows
     paginatedData.forEach(m => {
         const expDate = new Date(m.expiryDate);
-        const daysLeft = Math.ceil((expDate - new Date()) / (1000 * 60 * 60 * 24));
+        const now = new Date();
+        now.setHours(0,0,0,0); // Normalize today
+        
+        const diffTime = expDate - now;
+        const daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        
         let statusClass = daysLeft < 0 ? 'status-due' : (daysLeft < 5 ? 'status-pending' : 'status-paid');
         let statusText = daysLeft < 0 ? 'Expired' : (daysLeft < 5 ? `Due: ${daysLeft}` : 'Paid');
+        
+        // Whatsapp Helper
         let waType = daysLeft < 0 ? 'expired' : 'reminder';
         let waData = daysLeft < 0 ? m.expiryDate : daysLeft;
+
+        // Attendance Check
+        const todayStr = new Date().toISOString().split('T')[0];
+        const isPresentToday = m.attendance && m.attendance.includes(todayStr);
+        const attendanceColor = isPresentToday ? '#22c55e' : 'inherit'; 
         
+        const photo = m.photo || 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI1MCIgZmlsbD0iIzMzMyIvPjwvc3ZnPg==';
+
         list.innerHTML += `
-        <div class="member-row">
+        <div class="member-row" style="flex-wrap: wrap;">
+            
             <i class="fa-solid fa-ellipsis-vertical mobile-kebab-btn" onclick="toggleRowAction('${m.id}')"></i>
-            <div class="profile-img-container"><img src="${m.photo || 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI1MCIgZmlsbD0iIzMzMyIvPjwvc3ZnPg=='}" class="profile-circle" onclick="editMember('${m.id}')"></div>
-            <div class="info-block"><div class="member-id-tag">${m.memberId}</div><div class="name-phone-row"><span class="info-main">${m.name}</span></div></div>
-            <div class="info-block"><div class="info-main" style="color:${daysLeft<0?'#ef4444':'inherit'}">Exp: ${m.expiryDate}</div></div>
-            <div style="display:flex;flex-direction:column;gap:5px;"><span class="status-badge ${statusClass}">${statusText}</span><span style="font-size:0.75rem;color:#fff;background:#3b82f6;padding:2px 6px;border-radius:4px;text-align:center;">${(m.attendance||[]).length} Days</span></div>
+            
+            <div class="profile-img-container">
+                <img src="${photo}" class="profile-circle" onclick="editMember('${m.id}')">
+            </div>
+            
+            <div class="info-block">
+                <div class="member-id-tag">${m.memberId}</div>
+                <div class="name-phone-row"><span class="info-main">${m.name}</span></div>
+            </div>
+            
+            <div class="info-block">
+                <div class="info-main" style="color:${daysLeft < 0 ? '#ef4444' : 'inherit'}">Exp: ${m.expiryDate}</div>
+            </div>
+            
+            <div style="display:flex;flex-direction:column;gap:5px;">
+                <span class="status-badge ${statusClass}">${statusText}</span>
+                <span style="font-size:0.75rem;color:#fff;background:#3b82f6;padding:2px 6px;border-radius:4px;text-align:center;">
+                    ${(m.attendance || []).length} Days
+                </span>
+            </div>
+
             <div class="row-actions" id="actions-${m.id}">
-                <div class="icon-btn" onclick="markAttendance('${m.id}')"><i class="fa-solid fa-clipboard-check"></i></div>
-                <div class="icon-btn" onclick="renewMember('${m.id}')"><i class="fa-solid fa-arrows-rotate"></i></div>
-                <div class="icon-btn" onclick="editMember('${m.id}')"><i class="fa-solid fa-pen"></i></div>
-                <div class="icon-btn" onclick="sendWhatsApp('${m.phone}', '${m.name}', '${waType}', '${waData}')"><i class="fa-brands fa-whatsapp"></i></div>
-                <div class="icon-btn" onclick='generateInvoice(${JSON.stringify(m)})'><i class="fa-solid fa-file-invoice"></i></div>
+                <div class="icon-btn" onclick="markAttendance('${m.id}')" title="Mark Attendance" style="color:${attendanceColor}">
+                    <i class="fa-solid fa-clipboard-check"></i>
+                </div>
+                <div class="icon-btn" onclick="toggleHistory('${m.id}')" title="View History" style="color:var(--accent)">
+                    <i class="fa-solid fa-clock-rotate-left"></i>
+                </div>
+                <div class="icon-btn" onclick="renewMember('${m.id}')" title="Renew Membership">
+                    <i class="fa-solid fa-arrows-rotate"></i>
+                </div>
+                <div class="icon-btn" onclick="editMember('${m.id}')" title="Edit Details">
+                    <i class="fa-solid fa-pen"></i>
+                </div>
+                <div class="icon-btn" onclick="sendWhatsApp('${m.phone}', '${m.name}', '${waType}', '${waData}')" title="Send WhatsApp">
+                    <i class="fa-brands fa-whatsapp"></i>
+                </div>
                 <div class="icon-btn" onclick='generateIDCard(${JSON.stringify(m)})' title="Download ID Card" style="color:#facc15;">
                     <i class="fa-solid fa-id-card"></i>
                 </div>
-                <div class="icon-btn" onclick="deleteMember('${m.id}')"><i class="fa-solid fa-trash"></i></div>
+                <div class="icon-btn" onclick='generateInvoice(${JSON.stringify(m)})' title="Download Invoice">
+                    <i class="fa-solid fa-file-invoice"></i>
+                </div>
+                <div class="icon-btn" onclick="deleteMember('${m.id}')" title="Delete Member" style="color:#ef4444;">
+                    <i class="fa-solid fa-trash"></i>
+                </div>
             </div>
-        </div>`;
+
+            <div id="history-${m.id}" class="history-panel" style="display:none; width:100%; flex-basis: 100%; background:#1e293b; padding:20px; border-radius:8px; margin-top:15px; border-top: 1px solid #333; border-left: 5px solid var(--accent); box-shadow: inset 0 0 10px rgba(0,0,0,0.2);"></div>
+        </div>
+        `;
     });
 };
 
@@ -1533,7 +1742,30 @@ window.toggleMemberModal = () => {
     el.style.display = el.style.display==='flex'?'none':'flex'; 
 };
 window.calcExpiry = () => { const j = document.getElementById('inp-join').value; const plan = document.getElementById('inp-plan').value; if(j && plan) { const d = new Date(j); const val = parseInt(plan); if(plan.includes('d')) d.setDate(d.getDate() + val); else if(plan.includes('y')) d.setFullYear(d.getFullYear() + val); else d.setMonth(d.getMonth() + val); document.getElementById('inp-expiry').value = d.toISOString().split('T')[0]; } };
-window.toggleTxModal = () => { document.getElementById('modal-transaction').style.display = document.getElementById('modal-transaction').style.display==='flex'?'none':'flex'; };
+
+window.toggleTxModal = () => { 
+    const el = document.getElementById('modal-transaction');
+    
+    // Check if we are opening or closing
+    if(el.style.display === 'flex') {
+        // CLOSING: Clear the editing ID and form
+        el.style.display = 'none';
+        editingTxId = null; // <--- CRITICAL FIX
+        
+        // Clear inputs
+        document.getElementById('tx-amount').value = "";
+        document.getElementById('tx-category').value = "";
+        document.getElementById('tx-date').value = "";
+    } else {
+        // OPENING
+        el.style.display = 'flex';
+        // Set default date to today if empty
+        if(!document.getElementById('tx-date').value) {
+            document.getElementById('tx-date').valueAsDate = new Date();
+        }
+    }
+};
+
 window.changePage = (type, direction) => {
     if (type === 'members') {
         memberPage += direction;
@@ -1558,112 +1790,97 @@ window.generateIDCard = (m) => {
         format: [85.6, 53.98] // Standard ID-1 Card Size
     });
 
-    // --- DESIGN SETTINGS ---
+    // --- COLORS ---
     const primaryColor = [20, 20, 20];   // Dark Background
-    const accentColor = [239, 68, 68];   // Red Accent (Match your theme)
+    const accentColor = [249, 115, 22];  // ORANGE Accent (Changed from Red)
     const textColor = [255, 255, 255];   // White Text
 
     // 2. Draw Background
     doc.setFillColor(...primaryColor);
     doc.rect(0, 0, 85.6, 53.98, 'F');
 
-    // 3. Draw Header Strip
+    // 3. Draw Header Strip (Orange)
     doc.setFillColor(...accentColor);
     doc.rect(0, 0, 85.6, 10, 'F');
 
-    // 4. Add Gym Name (Header)
+    // 4. Add Dynamic Gym Name
     doc.setFont("helvetica", "bold");
     doc.setFontSize(12);
-    doc.setTextColor(...textColor);
+    doc.setTextColor(255, 255, 255);
+    // Center the gym name
     doc.text(gymSettings.name.toUpperCase(), 42.8, 7, { align: "center" });
 
     // 5. Member Photo (Left Side)
-    // We check if they have a photo, otherwise put a gray box
     if (m.photo && m.photo.length > 100) {
         try {
-            doc.addImage(m.photo, 'JPEG', 5, 15, 25, 25); // x, y, w, h
+            doc.addImage(m.photo, 'JPEG', 5, 15, 25, 25);
         } catch (e) {
-            // Fallback if image is broken
             doc.setFillColor(50, 50, 50);
             doc.rect(5, 15, 25, 25, 'F');
-            doc.setFontSize(6);
-            doc.text("No Photo", 17.5, 27, { align: "center" });
         }
     } else {
         doc.setFillColor(50, 50, 50);
         doc.rect(5, 15, 25, 25, 'F');
     }
 
-    // 6. Member Details (Right Side)
+    // 6. Member Details (Right Side) - REORGANIZED FOR PHONE NUMBER
     doc.setTextColor(255, 255, 255);
-    doc.setFontSize(8);
-    doc.setFont("helvetica", "normal");
-
-    // Name
-    doc.text("Name:", 35, 18);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(10);
-    doc.text(m.name.toUpperCase(), 35, 22);
+    const labelX = 35;
+    
+    // NAME
+    doc.setFontSize(7); doc.setFont("helvetica", "normal");
+    doc.text("Name:", labelX, 17);
+    doc.setFontSize(9); doc.setFont("helvetica", "bold");
+    doc.text(m.name.toUpperCase(), labelX, 21);
 
     // ID
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(8);
-    doc.text("Member ID:", 35, 28);
-    doc.setFont("helvetica", "bold");
-    doc.text(m.memberId, 35, 32);
+    doc.setFontSize(7); doc.setFont("helvetica", "normal");
+    doc.text("Member ID:", labelX, 26);
+    doc.setFontSize(9); doc.setFont("helvetica", "bold");
+    doc.text(m.memberId, labelX, 30);
 
-    // Expiry
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(8);
-    doc.text("Valid Until:", 35, 38);
-    doc.setTextColor(...accentColor); // Make date red
-    doc.setFont("helvetica", "bold");
-    doc.text(m.expiryDate, 35, 42);
+    // PHONE (New Added Field)
+    doc.setFontSize(7); doc.setFont("helvetica", "normal");
+    doc.text("Phone:", labelX, 35);
+    doc.setFontSize(9); doc.setFont("helvetica", "bold");
+    doc.text(m.phone || "", labelX, 39);
 
-    // 7. Footer / Decorative Elements
+    // EXPIRY (Orange Highlight)
+    doc.setFontSize(7); doc.setFont("helvetica", "normal");
+    doc.setTextColor(200, 200, 200); // Light gray label
+    doc.text("Valid Until:", labelX, 44);
+    
+    doc.setTextColor(...accentColor); // Orange Text
+    doc.setFontSize(10); doc.setFont("helvetica", "bold");
+    doc.text(m.expiryDate, labelX + 15, 44);
+
+    // 7. Footer line
     doc.setDrawColor(...accentColor);
     doc.setLineWidth(0.5);
-    doc.line(5, 45, 80, 45); // Bottom line
+    doc.line(5, 47, 80, 47); 
 
+    // 8. Footer Sign (Gym Phone Removed)
     doc.setFontSize(6);
     doc.setTextColor(150, 150, 150);
-    doc.text("Authorized Signature", 75, 50, { align: "right" });
-    doc.text("+91 99485 92213", 5, 50, { align: "left" });
+    doc.text("Authorized Signature", 75, 52, { align: "right" });
 
-    // 8. Save
+    // Add Signature Image
+    if (gymSettings.signature && gymSettings.signature.length > 50) {
+        try {
+            doc.addImage(gymSettings.signature, 'JPEG', 60, 47, 20, 6);
+        } catch(e) {}
+    }
+
     doc.save(`${m.name}_ID_Card.pdf`);
 };
 // ======================================================
 // 9. SETTINGS & CONFIGURATION
 // ======================================================
 
-// Default Settings
-let gymSettings = {
-    name: "THE ULTIMATE GYM 2.0",
-    phone: "+91 99485 92213",
-    address: "1-2-607/75/76, LIC Colony, Road, Hyderabad",
-    taxId: "36CYZPA903181Z1",
-    signature: "Sign.jpeg" // Default image path
-};
+
 
 // 1. Load Settings on Init
-async function loadGymSettings() {
-    if(window.isDemoMode) return; // Use defaults in demo
-    
-    try {
-        const docRef = doc(db, `gyms/${currentUser.uid}/settings`, 'config');
-        const docSnap = await getDocs(query(collection(db, `gyms/${currentUser.uid}/settings`))); // Simplification for single doc
-        // Better:
-        // Since we don't have a specific ID, we usually store it in a fixed ID 'config'
-        // Let's assume we save to 'config'
-        // For now, let's just stick to localStorage for speed + Demo
-        const localConfig = localStorage.getItem('gymConfig');
-        if(localConfig) {
-            gymSettings = JSON.parse(localConfig);
-            updateSettingsUI();
-        }
-    } catch(e) { console.log("Config load error", e); }
-}
+
 
 // 2. Update UI inputs with current settings
 function updateSettingsUI() {
@@ -1803,4 +2020,451 @@ window.restoreDatabase = () => {
         }
     };
     reader.readAsText(input.files[0]);
+};
+// ======================================================
+// 11. DYNAMIC SETTINGS ENGINE
+// ======================================================
+
+// NOTE: 'gymSettings' variable must be defined at the TOP of app.js 
+// alongside 'currentUser' and 'members'. DO NOT redeclare it here.
+
+// 1. Load Settings Function (Unified)
+window.loadGymSettings = async () => {
+    // A. Try LocalStorage First (Instant Load)
+    const saved = localStorage.getItem('gymConfig');
+    if (saved) {
+        try {
+            gymSettings = JSON.parse(saved); 
+        } catch (e) {
+            console.error("Error parsing settings", e);
+        }
+    }
+    
+    // B. Try Firestore (Sync Latest)
+    if (!window.isDemoMode && currentUser) {
+        try {
+            const docRef = doc(db, `gyms/${currentUser.uid}/settings`, 'config');
+            const docSnap = await getDocs(query(collection(db, `gyms/${currentUser.uid}/settings`))); 
+            // In a real app, you'd use getDoc(docRef). Using collection query for safety as per your code structure.
+            if (!docSnap.empty) {
+                // Find the config doc or just take the first one
+                const data = docSnap.docs[0].data();
+                // Merge cloud data with defaults to ensure 'plans' array exists
+                gymSettings = { ...gymSettings, ...data };
+                // Update LocalStorage
+                localStorage.setItem('gymConfig', JSON.stringify(gymSettings));
+            }
+        } catch(e) {
+            console.warn("Cloud settings sync failed, using local.", e);
+        }
+    }
+
+    // C. Update UI Inputs (Settings Tab)
+    const nameInput = document.getElementById('set-gym-name');
+    if (nameInput) {
+        nameInput.value = gymSettings.name || "";
+        document.getElementById('set-gym-phone').value = gymSettings.phone || "";
+        document.getElementById('set-gym-address').value = gymSettings.address || "";
+        document.getElementById('set-gym-tax').value = gymSettings.taxId || "";
+        
+        if (gymSettings.signature && gymSettings.signature.length > 50) {
+            document.getElementById('set-sign-preview').src = gymSettings.signature;
+        }
+    }
+
+    // D. RENDER PLANS & DROPDOWNS (Crucial for your new features)
+    if (window.renderSettingsPlans) window.renderSettingsPlans();
+    if (window.updatePlanDropdowns) window.updatePlanDropdowns();
+};
+
+// 2. Save Settings Function
+window.saveGymSettings = () => {
+    const name = document.getElementById('set-gym-name').value;
+    const phone = document.getElementById('set-gym-phone').value;
+    const address = document.getElementById('set-gym-address').value;
+    const tax = document.getElementById('set-gym-tax').value;
+    const signature = document.getElementById('set-sign-preview').src;
+
+    if (!name) return alert("Gym Name is required!");
+
+    // Update Global Variable
+    gymSettings = {
+        name,
+        phone,
+        address,
+        taxId: tax,
+        signature
+    };
+
+    // Save to Browser Memory
+    localStorage.setItem('gymConfig', JSON.stringify(gymSettings));
+    alert("✅ Settings Saved! Invoices & ID Cards will now use these details.");
+};
+
+// 3. Signature Upload Helper
+window.previewSignature = (input) => {
+    if (input.files && input.files[0]) {
+        const reader = new FileReader();
+        reader.onload = (e) => document.getElementById('set-sign-preview').src = e.target.result;
+        reader.readAsDataURL(input.files[0]);
+    }
+};
+
+// --- INITIALIZE SETTINGS ON LOAD ---
+setTimeout(window.loadGymSettings, 500);
+
+// --- INITIALIZE SETTINGS ON LOAD ---
+// This ensures settings are loaded as soon as the script runs
+setTimeout(window.loadGymSettings, 500);
+
+// ======================================================
+// 13. RECORDS TAB (Detailed History)
+// ======================================================
+
+// Initialize Dates on Load (Default to Current Month)
+window.initRecordsDates = () => {
+    // 1. Populate Years
+    window.initYearDropdown();
+
+    // 2. Set Default Period
+    const dropdown = document.getElementById('period-select');
+    if(dropdown) {
+        dropdown.value = "this_month";
+        window.applyRecordPeriod();
+    }
+};
+
+window.renderRecordsTab = () => {
+    const list = document.getElementById('records-list-container');
+    if(!list) return;
+    list.innerHTML = "";
+
+    // 1. Get Input Values (Including New Type Filter)
+    const fromDate = document.getElementById('rec-date-from').value;
+    const toDate = document.getElementById('rec-date-to').value;
+    const searchQ = document.getElementById('rec-search').value.toLowerCase();
+    
+    // NEW: Get Type Filter Value ('all', 'income', 'expense')
+    const typeFilter = document.getElementById('rec-type-filter') ? document.getElementById('rec-type-filter').value : 'all';
+
+    // 2. Filter Logic
+    let filtered = transactions.filter(t => {
+        const tDate = t.date; 
+        
+        // Date Check
+        const isAfterStart = !fromDate || tDate >= fromDate;
+        const isBeforeEnd = !toDate || tDate <= toDate;
+        
+        // Search Check
+        const matchesSearch = 
+            (t.category && t.category.toLowerCase().includes(searchQ)) || 
+            (t.amount && t.amount.toString().includes(searchQ)) ||
+            (t.mode && t.mode.toLowerCase().includes(searchQ));
+
+        // NEW: Type Check
+        const matchesType = (typeFilter === 'all') || (t.type === typeFilter);
+
+        // Return TRUE only if ALL conditions match
+        return isAfterStart && isBeforeEnd && matchesSearch && matchesType;
+    });
+
+    // 3. Sort (Strict Newest First)
+    filtered.sort((a, b) => {
+        const dateA = new Date(a.date).getTime();
+        const dateB = new Date(b.date).getTime();
+        return dateB - dateA; 
+    });
+
+    // 4. Calculate Totals (Based on filtered view)
+    let inc = 0, exp = 0;
+    filtered.forEach(t => {
+        if(t.type === 'income') inc += t.amount;
+        else exp += t.amount;
+    });
+
+    // Update Top Cards
+    document.getElementById('rec-total-inc').innerText = `₹${inc.toLocaleString()}`;
+    document.getElementById('rec-total-exp').innerText = `₹${exp.toLocaleString()}`;
+    const bal = inc - exp;
+    const balEl = document.getElementById('rec-total-bal');
+    balEl.innerText = `₹${bal.toLocaleString()}`;
+    balEl.style.color = bal >= 0 ? '#22c55e' : '#ef4444';
+
+    // 5. Render List
+    if(filtered.length === 0) {
+        list.innerHTML = `<div style="text-align:center; padding:40px; color:#666; font-style:italic;">No records found.</div>`;
+        return;
+    }
+
+    filtered.forEach(t => {
+        const isInc = t.type === 'income';
+        const color = isInc ? '#22c55e' : '#ef4444';
+        const sign = isInc ? '+' : '-';
+        const modeBadge = t.mode ? `<span style="font-size:0.7rem; background:#333; color:#ccc; padding:2px 6px; border-radius:4px; margin-left:8px;">${t.mode}</span>` : '';
+        
+        const dateObj = new Date(t.date);
+
+        list.innerHTML += `
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:15px; border-bottom:1px solid #333; background:var(--bg-card);">
+                
+                <div style="display:flex; align-items:center; gap:15px; flex:1;">
+                    <div style="background:var(--bg-body); border:1px solid var(--border); padding:5px 10px; border-radius:6px; text-align:center; min-width:50px;">
+                        <div style="font-size:0.7rem; color:#888; text-transform:uppercase;">${dateObj.toLocaleDateString('en-US', {weekday:'short'})}</div>
+                        <div style="font-size:0.9rem; font-weight:bold; color:var(--text-main);">${dateObj.getDate()}</div>
+                    </div>
+
+                    <div>
+                        <div style="font-size:1rem; color:var(--text-main); font-weight:500;">
+                            ${t.category} ${modeBadge}
+                        </div>
+                        <div style="font-size:0.8rem; color:#666; margin-top:3px;">
+                            ${t.date}
+                        </div>
+                    </div>
+                </div>
+
+                <div style="text-align:right;">
+                    <div style="font-weight:bold; color:${color}; font-size:1.1rem;">
+                        ${sign} ₹${t.amount}
+                    </div>
+                    <div style="display:flex; gap:12px; justify-content:flex-end; margin-top:5px;">
+                        <i class="fa-solid fa-pen" style="font-size:0.8rem; color:#888; cursor:pointer;" onclick="editTransaction('${t.id}')"></i>
+                        <i class="fa-solid fa-trash" style="font-size:0.8rem; color:#ef4444; cursor:pointer;" onclick="deleteTransaction('${t.id}')"></i>
+                    </div>
+                </div>
+
+            </div>
+        `;
+    });
+};
+
+// Auto-Run Init
+setTimeout(() => {
+    window.initRecordsDates();
+}, 1000);
+// ======================================================
+// 14. PERIOD SELECTOR LOGIC
+// ======================================================
+
+window.applyRecordPeriod = () => {
+    const dropdown = document.getElementById('period-select');
+    const yearDropdown = document.getElementById('year-select'); // Get Year Dropdown
+    const fromEl = document.getElementById('rec-date-from');
+    const toEl = document.getElementById('rec-date-to');
+
+    if (!dropdown || !fromEl || !toEl || !yearDropdown) return;
+
+    const period = dropdown.value;
+    
+    // USE SELECTED YEAR (Fallback to current year if something fails)
+    const selectedYear = parseInt(yearDropdown.value) || new Date().getFullYear();
+    const today = new Date();
+
+    // Helper for formatting
+    const formatDate = (date) => {
+        const offset = date.getTimezoneOffset();
+        const adjusted = new Date(date.getTime() - (offset * 60 * 1000));
+        return adjusted.toISOString().split('T')[0];
+    };
+
+    let start, end;
+
+    if (period === 'all_time') {
+        fromEl.value = "";
+        toEl.value = "";
+        window.renderRecordsTab();
+        return;
+    } 
+    else if (period === 'this_month') {
+        // Special Case: "This Month" usually implies the *current actual month*,
+        // but if user changed the Year to 2023, maybe they want "Current Month of 2023"?
+        // Let's keep it simple: "This Month" means current calendar month.
+        // If they want Jan 2023, they should pick "January" + "2023".
+        start = new Date(today.getFullYear(), today.getMonth(), 1);
+        end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    } 
+    else if (period === 'week') {
+        start = new Date(today);
+        start.setDate(today.getDate() - today.getDay());
+        end = new Date(today);
+    }
+    // QUARTERS
+    else if (period === 'q1') { start = new Date(selectedYear, 0, 1); end = new Date(selectedYear, 3, 0); }
+    else if (period === 'q2') { start = new Date(selectedYear, 3, 1); end = new Date(selectedYear, 6, 0); }
+    else if (period === 'q3') { start = new Date(selectedYear, 6, 1); end = new Date(selectedYear, 9, 0); }
+    else if (period === 'q4') { start = new Date(selectedYear, 9, 1); end = new Date(selectedYear, 12, 0); }
+    
+    // SPECIFIC MONTHS (0 = Jan, 1 = Feb, etc.)
+    else if (!isNaN(parseInt(period))) {
+        const month = parseInt(period);
+        start = new Date(selectedYear, month, 1);
+        end = new Date(selectedYear, month + 1, 0);
+    }
+
+    if (start && end) {
+        fromEl.value = formatDate(start);
+        toEl.value = formatDate(end);
+        window.renderRecordsTab();
+    }
+};
+window.initYearDropdown = () => {
+    const sel = document.getElementById('year-select');
+    if(!sel) return;
+    
+    sel.innerHTML = "";
+    const currentYear = new Date().getFullYear();
+    
+    // Add years: Current Year - 5  to  Current Year + 1
+    for(let y = currentYear - 4; y <= currentYear + 1; y++) {
+        const opt = document.createElement('option');
+        opt.value = y;
+        opt.innerText = y;
+        if(y === currentYear) opt.selected = true; // Auto-select current year
+        sel.appendChild(opt);
+    }
+};
+
+// ======================================================
+// PLAN MANAGEMENT & SNAPSHOT LOGIC
+// ======================================================
+
+// 1. ADD PLAN: Saves to Firestore
+window.addPlan = async () => {
+    const name = document.getElementById('new-plan-name').value;
+    const dur = document.getElementById('new-plan-dur').value;
+    const price = document.getElementById('new-plan-price').value;
+
+    if (!name || !price) return alert("Please enter Plan Name and Price");
+
+    const newPlan = { id: Date.now().toString(), name, duration: dur, price: parseFloat(price) };
+
+    // Get current settings, add new plan, save back
+    if (!gymSettings.plans) gymSettings.plans = [];
+    gymSettings.plans.push(newPlan);
+
+    try {
+        await setDoc(doc(db, `gyms/${currentUser.uid}/settings`, 'config'), gymSettings);
+        
+        // Clear inputs
+        document.getElementById('new-plan-name').value = "";
+        document.getElementById('new-plan-price').value = "";
+        
+        // Refresh UI
+        window.renderSettingsPlans(); 
+        window.updatePlanDropdowns(); // Update the Member Modal list too
+        alert("Plan Added Successfully!");
+    } catch (e) {
+        console.error(e);
+        alert("Error saving plan");
+    }
+};
+
+// 2. RENDER PLANS: Shows them in Settings Table
+window.renderSettingsPlans = () => {
+    const list = document.getElementById('settings-plan-list');
+    if (!list) return;
+    list.innerHTML = "";
+
+    const plans = gymSettings.plans || [];
+
+    if (plans.length === 0) {
+        list.innerHTML = `<tr><td colspan="4" style="padding:20px; text-align:center; color:#666;">No plans added yet.</td></tr>`;
+        return;
+    }
+
+    plans.forEach(p => {
+        // Format duration text (e.g., "1m" -> "1 Month")
+        const durText = p.duration === '1m' ? '1 Month' : p.duration === '3m' ? '3 Months' : p.duration === '6m' ? '6 Months' : '1 Year';
+        
+        list.innerHTML += `
+            <tr style="border-bottom:1px solid #333;">
+                <td style="padding:12px; font-weight:bold;">${p.name}</td>
+                <td style="padding:12px; color:#aaa;">${durText}</td>
+                <td style="padding:12px; color:#22c55e;">₹${p.price}</td>
+                <td style="padding:12px; text-align:right;">
+                    <button onclick="deletePlan('${p.id}')" style="background:#ef4444; border:none; color:white; padding:5px 10px; border-radius:5px; cursor:pointer;">
+                        <i class="fa-solid fa-trash"></i>
+                    </button>
+                </td>
+            </tr>
+        `;
+    });
+};
+
+// 3. DELETE PLAN
+window.deletePlan = async (id) => {
+    if (!confirm("Delete this plan?")) return;
+    gymSettings.plans = gymSettings.plans.filter(p => p.id !== id);
+    await setDoc(doc(db, `gyms/${currentUser.uid}/settings`, 'config'), gymSettings);
+    window.renderSettingsPlans();
+    window.updatePlanDropdowns();
+};
+
+// 4. UPDATE DROPDOWN: Populates "Quick Select" in Member Modal
+window.updatePlanDropdowns = () => {
+    // 1. Target BOTH dropdowns
+    const targets = ['quick-plan-select', 'renew-plan'];
+    const plans = gymSettings.plans || [];
+
+    targets.forEach(id => {
+        const select = document.getElementById(id);
+        if (!select) return;
+
+        // Reset with default option
+        const defaultText = id === 'renew-plan' ? '-- Select Plan --' : '-- Quick Select (Optional) --';
+        select.innerHTML = `<option value="">${defaultText}</option>`;
+
+        plans.forEach(p => {
+            // We store data in value as JSON string for easy access
+            const dataVal = JSON.stringify({ dur: p.duration, price: p.price });
+            select.innerHTML += `<option value='${dataVal}'>${p.name} - ₹${p.price}</option>`;
+        });
+    });
+};
+
+// 5. APPLY PLAN (THE SNAPSHOT LOGIC)
+// This runs when you select a plan in the Member Modal
+window.applyQuickPlan = () => {
+    const select = document.getElementById('quick-plan-select');
+    const val = select.value;
+
+    if (!val) return; // If they selected "Select Plan", do nothing
+
+    const data = JSON.parse(val); // Get {dur: "1m", price: 3000}
+
+    // A. Auto-fill Duration
+    const planEl = document.getElementById('inp-plan');
+    if (planEl) {
+        planEl.value = data.dur;
+        // Trigger calculation of expiry date
+        if (window.calcExpiry) window.calcExpiry(); 
+    }
+
+    // B. Auto-fill Price (CRITICAL STEP)
+    // We COPY the price value into the input field.
+    // When you click "Save Member", the system saves THIS number.
+    // It does NOT link back to the plan settings.
+    const amtEl = document.getElementById('inp-amount');
+    if (amtEl) amtEl.value = data.price;
+};
+
+// Add this to app.js if missing
+window.applyRenewPlan = () => {
+    const select = document.getElementById('renew-plan');
+    const val = select.value;
+    
+    if (!val) return; 
+
+    try {
+        // The value is stored as a JSON string like: {"dur":"1m","price":3000}
+        const data = JSON.parse(val); 
+        
+        // Target the "Amount to Pay" input
+        const amtEl = document.getElementById('renew-amount');
+        if (amtEl) {
+            amtEl.value = data.price; // <--- Auto-fill happens here
+        }
+    } catch(e) {
+        console.error("Error parsing plan data", e);
+    }
 };
